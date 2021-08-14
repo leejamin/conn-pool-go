@@ -37,12 +37,12 @@ type Stats struct {
 }
 
 type Pooler interface {
-	NewConn(context.Context) (*Conn, error)
-	CloseConn(*Conn) error
+	NewConn(context.Context) (*conn, error)
+	CloseConn(*conn) error
 
-	Get(context.Context) (*Conn, error)
-	Put(context.Context, *Conn)
-	Remove(context.Context, *Conn, error)
+	Get(context.Context) (*conn, error)
+	Put(context.Context, *conn)
+	Remove(context.Context, *conn, error)
 
 	Len() int
 	IdleLen() int
@@ -65,8 +65,8 @@ type ConnPool struct {
 	queue chan struct{}
 
 	connsMu      sync.Mutex
-	conns        []*Conn
-	idleConns    []*Conn
+	conns        []*conn
+	idleConns    []*conn
 	poolSize     int
 	idleConnsLen int
 
@@ -82,8 +82,8 @@ func NewConnPool(opt *Options) *ConnPool {
 	p := &ConnPool{
 		opt:       opt,
 		queue:     make(chan struct{}, opt.PoolSize),
-		conns:     make([]*Conn, 0, opt.PoolSize),
-		idleConns: make([]*Conn, 0, opt.PoolSize),
+		conns:     make([]*conn, 0, opt.PoolSize),
+		idleConns: make([]*conn, 0, opt.PoolSize),
 		closedCh:  make(chan struct{}),
 	}
 
@@ -114,8 +114,8 @@ func (p *ConnPool) checkMinIdleConns() {
 				p.poolSize--
 				p.idleConnsLen--
 				p.connsMu.Unlock()
+				p.opt.Logger.Printf("addIdleConn failed. err: %v\n", err)
 			}
-			p.opt.Logger.Printf("err: %v\n", err)
 		}()
 	}
 }
@@ -139,11 +139,11 @@ func (p *ConnPool) addIdleConn() error {
 	return nil
 }
 
-func (p *ConnPool) NewConn(ctx context.Context) (*Conn, error) {
+func (p *ConnPool) NewConn(ctx context.Context) (*conn, error) {
 	return p.newConn(ctx, false)
 }
 
-func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
+func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*conn, error) {
 	cn, err := p.dialConn(ctx, pooled)
 	if err != nil {
 		return nil, err
@@ -164,7 +164,7 @@ func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
 	return cn, nil
 }
 
-func (p *ConnPool) dialConn(ctx context.Context, pooled bool) (*Conn, error) {
+func (p *ConnPool) dialConn(ctx context.Context, pooled bool) (*conn, error) {
 	if p.closed() {
 		return nil, ErrClosed
 	}
@@ -173,7 +173,7 @@ func (p *ConnPool) dialConn(ctx context.Context, pooled bool) (*Conn, error) {
 		return nil, p.getLastDialError()
 	}
 
-	netConn, err := p.opt.Dialer(ctx)
+	c, err := p.opt.Dialer(ctx)
 	if err != nil {
 		p.setLastDialError(err)
 		if atomic.AddUint32(&p.dialErrorsNum, 1) == uint32(p.opt.PoolSize) {
@@ -182,7 +182,7 @@ func (p *ConnPool) dialConn(ctx context.Context, pooled bool) (*Conn, error) {
 		return nil, err
 	}
 
-	cn := NewConn(netConn)
+	cn := NewConn(c)
 	cn.pooled = pooled
 	return cn, nil
 }
@@ -219,7 +219,7 @@ func (p *ConnPool) getLastDialError() error {
 }
 
 // Get returns existed connection from the pool or creates a new one.
-func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
+func (p *ConnPool) Get(ctx context.Context) (*conn, error) {
 	if p.closed() {
 		return nil, ErrClosed
 	}
@@ -294,8 +294,7 @@ func (p *ConnPool) freeTurn() {
 	<-p.queue
 }
 
-func (p *ConnPool) popIdle() *Conn {
-	p.opt.Logger.Println("idle length: ", len(p.idleConns))
+func (p *ConnPool) popIdle() *conn {
 
 	if len(p.idleConns) == 0 {
 		return nil
@@ -309,7 +308,7 @@ func (p *ConnPool) popIdle() *Conn {
 	return cn
 }
 
-func (p *ConnPool) Put(ctx context.Context, cn *Conn) {
+func (p *ConnPool) Put(ctx context.Context, cn *conn) {
 	if !cn.pooled {
 		p.Remove(ctx, cn, nil)
 		return
@@ -322,24 +321,24 @@ func (p *ConnPool) Put(ctx context.Context, cn *Conn) {
 	p.freeTurn()
 }
 
-func (p *ConnPool) Remove(ctx context.Context, cn *Conn, reason error) {
+func (p *ConnPool) Remove(ctx context.Context, cn *conn, reason error) {
 	p.removeConnWithLock(cn)
 	p.freeTurn()
 	_ = p.closeConn(cn)
 }
 
-func (p *ConnPool) CloseConn(cn *Conn) error {
+func (p *ConnPool) CloseConn(cn *conn) error {
 	p.removeConnWithLock(cn)
 	return p.closeConn(cn)
 }
 
-func (p *ConnPool) removeConnWithLock(cn *Conn) {
+func (p *ConnPool) removeConnWithLock(cn *conn) {
 	p.connsMu.Lock()
 	p.removeConn(cn)
 	p.connsMu.Unlock()
 }
 
-func (p *ConnPool) removeConn(cn *Conn) {
+func (p *ConnPool) removeConn(cn *conn) {
 	for i, c := range p.conns {
 		if c == cn {
 			p.conns = append(p.conns[:i], p.conns[i+1:]...)
@@ -352,9 +351,9 @@ func (p *ConnPool) removeConn(cn *Conn) {
 	}
 }
 
-func (p *ConnPool) closeConn(cn *Conn) error {
+func (p *ConnPool) closeConn(cn *conn) error {
 	if p.opt.OnClose != nil {
-		_ = p.opt.OnClose(cn)
+		_ = p.opt.OnClose(cn.Conn)
 	}
 	return cn.Close()
 }
@@ -379,7 +378,7 @@ func (p *ConnPool) closed() bool {
 	return atomic.LoadUint32(&p._closed) == 1
 }
 
-func (p *ConnPool) Filter(fn func(*Conn) bool) error {
+func (p *ConnPool) Filter(fn func(*conn) bool) error {
 	p.connsMu.Lock()
 	defer p.connsMu.Unlock()
 
@@ -461,7 +460,7 @@ func (p *ConnPool) ReapStaleConns() (int, error) {
 	return n, nil
 }
 
-func (p *ConnPool) reapStaleConn() *Conn {
+func (p *ConnPool) reapStaleConn() *conn {
 	if len(p.idleConns) == 0 {
 		return nil
 	}
@@ -477,7 +476,7 @@ func (p *ConnPool) reapStaleConn() *Conn {
 	return cn
 }
 
-func (p *ConnPool) isStaleConn(cn *Conn) bool {
+func (p *ConnPool) isStaleConn(cn *conn) bool {
 	if p.opt.IdleTimeout == 0 && p.opt.MaxConnAge == 0 {
 		return false
 	}
@@ -493,7 +492,7 @@ func (p *ConnPool) isStaleConn(cn *Conn) bool {
 	return false
 }
 
-func (p *ConnPool) releaseConn(ctx context.Context, cn *Conn, err error) {
+func (p *ConnPool) releaseConn(ctx context.Context, cn *conn, err error) {
 	if isBadConn(err, false) {
 		p.Remove(ctx, cn, err)
 	} else {
@@ -501,7 +500,7 @@ func (p *ConnPool) releaseConn(ctx context.Context, cn *Conn, err error) {
 	}
 }
 
-func (p *ConnPool) WithConn(ctx context.Context, fn func(context.Context, *Conn) error) error {
+func (p *ConnPool) WithConn(ctx context.Context, fn func(context.Context, Conn) error) error {
 
 	cn, err := p.Get(ctx)
 	if err != nil {
@@ -514,13 +513,13 @@ func (p *ConnPool) WithConn(ctx context.Context, fn func(context.Context, *Conn)
 
 	done := ctx.Done()
 	if done == nil {
-		err = fn(ctx, cn)
+		err = fn(ctx, cn.Conn)
 		return err
 	}
 
 	errc := make(chan error, 1)
 	go func() {
-		errc <- fn(ctx, cn)
+		errc <- fn(ctx, cn.Conn)
 	}()
 
 	select {

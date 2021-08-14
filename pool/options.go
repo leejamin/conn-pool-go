@@ -19,8 +19,9 @@ type Options struct {
 
 	// Dialer creates new network connection and has priority over
 	// Network and Addr options.
-	Dialer  func(context.Context) (net.Conn, error)
-	OnClose func(*Conn) error
+	Dialer  func(context.Context) (Conn, error)
+
+	OnClose func(Conn) error
 
 	// Dial timeout for establishing new connections.
 	// Default is 5 seconds.
@@ -65,7 +66,7 @@ func (opt *Options) init() {
 	}
 
 	if opt.Dialer == nil {
-		opt.Dialer = func(ctx context.Context) (net.Conn, error) {
+		opt.Dialer = func(ctx context.Context) (Conn, error) {
 			netDialer := &net.Dialer{
 				Timeout: opt.DialTimeout,
 				KeepAlive: 5 * time.Minute,
